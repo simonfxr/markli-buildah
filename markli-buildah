@@ -17,7 +17,7 @@ KEEP=0
 DRYRUN=0
 
 args=$(getopt -o knt:s:i: \
-              --long tag:,shell:,input:,tempdir::,keep,dry-run \
+              --long tag:,shell:,input:,tmp-dir::,keep,dry-run \
               -n markli-buildah \
               -- "$@") || die "invalid arguments"
 
@@ -29,7 +29,7 @@ while (( $# > 0 )); do
         -t | --tag) TAG="$2"; shift ;;
         -i | --input) MD+=( "$(require_file "$2")" ); shift ;;
         -s | --shell) SHELL="$2"; shift ;;
-        --tempdir ) USETMP=1; TMPDIR="$2"; shift ;;
+        --tmp-dir ) USETMP=1; TMPDIR="$2"; shift ;;
         -k | --keep ) KEEP=1 ;;
         -n | --dry-run ) DRYRUN=1 ;;
         *) die "invalid arg: $1" ;;
@@ -48,34 +48,39 @@ INDIR="${1:-$PWD}"
 INDIR=$(cd "$INDIR"; pwd)
 readonly INDIR
 
-(( ${#MD[@]} > 0 )) || MD+=( "$INDIR"/markli-buildah.md )
+(( ${#MD[@]} > 0 )) || {
+    inp="$INDIR"/markli-buildah.md
+    [[ -r $inp ]] || die "no input file given and $inp does not exist"
+    MD+=( "$inp" )
+}
 
 [[ $TAG ]] || TAG=$(basename "$(dirname "${MD[0]}")")
 readonly TAG
 
 if (( USETMP )); then
-    OUTDIR=$(mktemp -p "$TMPDIR" -d markli-buildah-"${TAG}".XXXXXXXX)
+    MDDIR=$(mktemp -p "$TMPDIR" -d markli-buildah-"${TAG}".XXXXXXXX)
 else
-    OUTDIR="$INDIR"
+    MDDIR="$INDIR"
 fi
 
-OUTDIR=$(cd "$OUTDIR"; pwd)
-readonly OUTDIR
+MDDIR=$(cd "$MDDIR"; pwd)
+readonly MDDIR
 
 set -euo pipefail
 shopt -s nullglob
 
-echo "Build Directory:      $OUTDIR"
-echo "Input Markdown files: ${MD[*]}"
-echo "Tag:                  $TAG"
-echo "Shell:                $SHELL"
+echo "Tag:             $TAG"
+echo "Markli output:   $MDDIR"
+echo "Input files:     ${MD[*]}"
+echo "Default shell:   $SHELL"
+echo ""
 
 markli() { "$MARKLI_BIN" "$@"; }
 
 __buildah() { "$BUILDAH_BIN" "$@"; }
 
 buildah() {
-    echo "*** buildah $*" >&2
+    echo "*** buildah $*"
     ((!DRYRUN)) || return 0
     local ret=0
     "$BUILDAH_BIN" "$@" || {
@@ -90,13 +95,13 @@ for arg in "${MD[@]}"; do
     markli_args+=( -i "$arg" )
 done
 
-markli "${markli_args[@]}" -o "$OUTDIR"
+markli "${markli_args[@]}" -o "$MDDIR"
 
 CONTAINER=''
 
 cleanup_tmp() {
     if (( USETMP && !KEEP )); then
-        rm -rf "$OUTDIR"
+        rm -rf "$MDDIR"
     fi
 }
 
@@ -111,7 +116,7 @@ on_exit() {
 trap on_exit EXIT
 
 readarray -t files < <(
-    find "$OUTDIR" -mindepth 1 -maxdepth 1 -type f | sort
+    find "$MDDIR" -mindepth 1 -maxdepth 1 -type f | sort
 )
 
 for file in "${files[@]}"; do
@@ -130,7 +135,7 @@ for file in "${files[@]}"; do
             from=( $(< "$file") )
             echo "*** buildah from ${from[*]}"
             if (( DRYRUN )); then
-                CONTAINER="DRYRUN"
+                CONTAINER="DRYRUN_CONTAINER"
             else
                 CONTAINER=$(__buildah from "${from[@]}")
             fi
@@ -152,7 +157,14 @@ for file in "${files[@]}"; do
                 fi
             done <"$file"
             ;;
-        EXEC)
+        CONF)
+            while read -r ln; do
+                if [[ $ln ]]; then
+                    eval "buildah config $ln \$CONTAINER"
+                fi
+            done <"$file"
+            ;;
+        EVAL)
             eval "$(< "$file")"
             ;;
         *)
@@ -164,5 +176,5 @@ done
 trap - EXIT
 cleanup_tmp
 
-echo "Committing $CONTAINER to $TAG"
+echo "*** Committing $CONTAINER to $TAG"
 buildah commit "$CONTAINER" "$TAG"
