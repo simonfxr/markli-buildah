@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+
+die() { echo "Error: $*" >&2; exit 1; }
+
+require_bin() { type -P "$1" 2>/dev/null || die "$1 not found in \$PATH"; }
+
+require_file() { [[ -f $1 ]] || die "no such file: $1"; printf '%s' "$1"; }
+
+BUILDAH_BIN=$(require_bin buildah)
+MARKLI_BIN=$(require_bin markli)
+
+SHELL=/bin/sh
+TAG=''
+MD=( )
+USETMP=0
+KEEP=0
+DRYRUN=0
+
+args=$(getopt -o knt:s:i: \
+              --long tag:,shell:,input:,tempdir::,keep,dry-run \
+              -n markli-buildah \
+              -- "$@") || die "invalid arguments"
+
+eval set -- "$args"
+
+while (( $# > 0 )); do
+    case "$1" in
+        --) shift; break ;;
+        -t | --tag) TAG="$2"; shift ;;
+        -i | --input) MD+=( "$(require_file "$2")" ); shift ;;
+        -s | --shell) SHELL="$2"; shift ;;
+        --tempdir ) USETMP=1; TMPDIR="$2"; shift ;;
+        -k | --keep ) KEEP=1 ;;
+        -n | --dry-run ) DRYRUN=1 ;;
+        *) die "invalid arg: $1" ;;
+    esac
+    shift
+done
+
+readonly USETMP TMPDIR KEEP DRYRUN
+
+(( $# <= 1 )) || die "too many arguments"
+
+INDIR="${1:-$PWD}"
+
+[[ -d $INDIR ]] || die "No such directory: $INDIR"
+
+INDIR=$(cd "$INDIR"; pwd)
+readonly INDIR
+
+(( ${#MD[@]} > 0 )) || MD+=( "$INDIR"/markli-buildah.md )
+
+[[ $TAG ]] || TAG=$(basename "$(dirname "${MD[0]}")")
+readonly TAG
+
+if (( USETMP )); then
+    OUTDIR=$(mktemp -p "$TMPDIR" -d markli-buildah-"${TAG}".XXXXXXXX)
+else
+    OUTDIR="$INDIR"
+fi
+
+OUTDIR=$(cd "$OUTDIR"; pwd)
+readonly OUTDIR
+
+set -euo pipefail
+shopt -s nullglob
+
+echo "Build Directory:      $OUTDIR"
+echo "Input Markdown files: ${MD[*]}"
+echo "Tag:                  $TAG"
+echo "Shell:                $SHELL"
+
+markli() { "$MARKLI_BIN" "$@"; }
+
+__buildah() { "$BUILDAH_BIN" "$@"; }
+
+buildah() {
+    echo "*** buildah $*" >&2
+    ((!DRYRUN)) || return 0
+    local ret=0
+    "$BUILDAH_BIN" "$@" || {
+        ret=$?
+        echo "*** Error: buildah exited with $ret" >&2
+    }
+    return $ret
+}
+
+markli_args=( )
+for arg in "${MD[@]}"; do
+    markli_args+=( -i "$arg" )
+done
+
+markli "${markli_args[@]}" -o "$OUTDIR"
+
+CONTAINER=''
+
+cleanup_tmp() {
+    if (( USETMP && !KEEP )); then
+        rm -rf "$OUTDIR"
+    fi
+}
+
+on_exit() {
+    [[ ! $CONTAINER ]] || {
+        buildah rm "$CONTAINER" ||
+            echo "Removing $CONTAINER failed (error=$?)" >&2
+    }
+    cleanup_tmp
+}
+
+trap on_exit EXIT
+
+readarray -t files < <(
+    find "$OUTDIR" -mindepth 1 -maxdepth 1 -type f | sort
+)
+
+for file in "${files[@]}"; do
+    name=$(basename "$file")
+    tag="${name%%_*}"
+    rest="${name#${tag}_}"
+    op="${rest%%_*}"
+    op="${op%.*}"
+    case $op in
+        FROM)
+            [[ ! $CONTAINER ]] || {
+                echo "Error: \$CONTAINER already set, multiple FROM sections?" >&2
+                false
+            }
+            # shellcheck disable=SC2207
+            from=( $(< "$file") )
+            echo "*** buildah from ${from[*]}"
+            if (( DRYRUN )); then
+                CONTAINER="DRYRUN"
+            else
+                CONTAINER=$(__buildah from "${from[@]}")
+            fi
+            readonly CONTAINER
+            ;;
+        RUN)
+            echo "*** RUN $file"
+            # shellcheck disable=SC2086
+            buildah run "$CONTAINER" -- $SHELL <"$file"
+            ;;
+        SHELL)
+            SHELL=$(< "$file")
+            echo "*** SHELL is now $SHELL"
+            ;;
+        BLD)
+            while read -r ln; do
+                if [[ $ln ]]; then
+                    eval "buildah $ln"
+                fi
+            done <"$file"
+            ;;
+        EXEC)
+            eval "$(< "$file")"
+            ;;
+        *)
+            true
+            ;;
+    esac
+done
+
+trap - EXIT
+cleanup_tmp
+
+echo "Committing $CONTAINER to $TAG"
+buildah commit "$CONTAINER" "$TAG"
