@@ -93,7 +93,44 @@ arbitrary and will not be further interpreted.
 
 ## Command synopsis
 
-TODO
+```
+Usage: markli-buildah OPTIONS... [--] [DIR]
+
+Options:
+  DIR
+      Specify a directory where a markli-buildah.md can be found, if --tmp-dir
+      is not specified, it will also be used as the markli output directory.
+      Defaults to the current directory.
+
+  -t TAG, --tag=TAG
+      Set the image tag, by default the directory name of the input markdown
+      file is used.
+
+  -i FILE, --input=FILE
+      Add an input markdown file, can be specified multiple times. If no input
+      file is given, defaults to DIR/markli-buildah.md.
+
+  -s SHELL, --shell=SHELL
+      Set the internal SHELL variable, which will be used to interpret code
+      blocks. Defaults to /bin/sh.
+
+  --tmp-dir[=TMPDIR]
+      When this option is given, sets the markli output directory, if --keep is
+      not specified, this directory will be deleted afterwards. The TMPDIR
+      parameter specifies which temporary directory to use, defaults to $TMPDIR
+      or if unset, /tmp.
+
+  -k, --keep
+      When --tmp-dir is given, keep markli output files, instead of deleting
+      them.
+
+  -n, --dry-run
+      Do not execute any buildah commands, instead print what would be done.
+      Markli will still be executed as usual.
+
+  -h, --help
+      Print this message.
+```
 
 ## Installation
 
