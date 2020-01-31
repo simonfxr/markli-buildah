@@ -220,6 +220,4 @@ trap - EXIT
 cleanup_tmp
 
 echo "*** Committing $CONTAINER to $TAG"
-buildah commit "$CONTAINER"
-
- "$TAG"
+buildah commit "$CONTAINER" "$TAG"
